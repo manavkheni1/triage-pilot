@@ -1,96 +1,164 @@
 import gradio as gr
 import requests
+import pandas as pd
 import json
-import time
+from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. PASTE YOUR N8N WEBHOOK URL HERE
+# 1. CONFIGURATION
 # ---------------------------------------------------------
+# Your active ngrok Webhook URL
+WEBHOOK_URL = "https://gratifiable-nonequably-israel.ngrok-free.dev/webhook/21c6802a-eb78-4a76-8d39-552ee0f73afa"
 
-N8N_WEBHOOK_URL = "https://gratifiable-nonequably-israel.ngrok-free.dev/webhook-test/21c6802a-eb78-4a76-8d39-552ee0f73afa"
-def send_to_n8n(review_text, platform_source):
+# ---------------------------------------------------------
+# 2. CORE LOGIC FUNCTION
+# ---------------------------------------------------------
+def process_ticket(review_text, source, image_filepath=None):
     """
-    Sends the review to your n8n workflow via Webhook.
+    Sends the review to n8n, analyzes sentiment, and prepares files for download.
     """
-    if not review_text:
-        return "⚠️ Error: Please enter a review to analyze."
-
-    # This JSON structure matches what your OpenAI node expects
+    
+    # A. Prepare the Payload for n8n
     payload = {
         "message": {
-            "content": review_text
-        },
-        "source": platform_source,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            "content": review_text,
+            "source": source,
+            "has_attachment": True if image_filepath else False 
+        }
     }
-
+    
     try:
-        # Send the data to n8n
-        response = requests.post(N8N_WEBHOOK_URL, json=payload)
+        # B. Send to n8n Webhook
+        response = requests.post(WEBHOOK_URL, json=payload)
+        response.raise_for_status()
+        data = response.json()
         
-        # Check if it worked
-        if response.status_code == 200:
-            return f"""
-            ### ✅ Success!
+        # C. Extract Data (Safely handle missing keys)
+        sentiment_score = data.get("sentiment_score", 0)
+        sentiment_label = data.get("sentiment_label", "Unknown")
+        summary = data.get("summary", "No summary provided.")
+        suggested_response = data.get("suggested_response", "No response generated.")
+        
+        # D. Create Visual Report (Clean Markdown ONLY)
+        # Determine emoji based on score
+        emoji = "🔴" if int(sentiment_score) <= 5 else "🟢"
+        if 5 < int(sentiment_score) < 8:
+            emoji = "🟡"
             
-            **Status:** Sent to Agent.
-            **Action:** The AI is analyzing the sentiment and routing the file.
-            
-            *(Note: Check your Google Drive. A new file has been created in the specific folder based on the sentiment!)*
-            """
-        else:
-            return f"❌ Error {response.status_code}: {response.text}"
+        visual_report = f"""
+        # {emoji} Analysis Report
+        
+        | Metric | Value |
+        | :--- | :--- |
+        | **Sentiment** | **{sentiment_label}** ({sentiment_score}/10) |
+        | **Source** | {source} |
+        | **Attachment** | {"✅ Yes" if image_filepath else "❌ No"} |
+        
+        ### 📝 AI Summary
+        > *{summary}*
+        """
+        
+        # E. Create Downloadable CSV
+        df = pd.DataFrame([{
+            "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Source": source,
+            "Review": review_text,
+            "Sentiment": sentiment_label,
+            "Score": sentiment_score,
+            "Summary": summary,
+            "Suggested Response": suggested_response
+        }])
+        
+        csv_filename = "ticket_analysis_result.csv"
+        df.to_csv(csv_filename, index=False)
+        
+        # Return Report AND the clean Suggested Response text separately
+        return visual_report, suggested_response, csv_filename, data
 
     except Exception as e:
-        return f"❌ Connection Failed: {str(e)}"
+        # Error Handling
+        error_msg = f"❌ Error: {str(e)}"
+        return error_msg, "Error generating response.", None, {"error": str(e)}
 
 # ---------------------------------------------------------
-# 2. THE USER INTERFACE (Layout)
+# 3. USER INTERFACE (Gradio Blocks)
 # ---------------------------------------------------------
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
+# Note: Moved 'theme' to the launch() call at the bottom to fix the warning
+with gr.Blocks(title="Smart Customer Router") as demo:
     
-    # Title and Description
+    # Header
     gr.Markdown(
         """
-        # 🧠 Smart Customer Service Router
-        ### Powered by n8n + OpenAI
-        
-        **How it works:** Enter a customer review below. This tool sends it to an AI Agent which:
-        1. Analyzes the sentiment (Positive vs. Negative).
-        2. Routes it to the correct department (Google Drive Folder).
+        # 🤖 Smart Customer Service Router
+        **Analyze reviews, detect sentiment, and triage tickets automatically.**
         """
     )
     
     with gr.Row():
-        # Left Side (Inputs)
-        with gr.Column():
-            gr.Markdown("### 📥 New Ticket")
+        # --- LEFT COLUMN: INPUTS ---
+        with gr.Column(scale=1):
+            gr.Markdown("### 📥 New Ticket Input")
+            
+            input_source = gr.Dropdown(
+                ["Email Support", "Google Reviews", "Twitter", "Phone Transcript"], 
+                label="Source Platform", 
+                value="Email Support"
+            )
+            
             input_text = gr.Textbox(
                 label="Customer Review / Complaint", 
-                placeholder="Example: I ordered this 3 weeks ago and it still hasn't arrived! I am very angry.",
+                placeholder="Paste the customer's message here...", 
                 lines=5
             )
-            input_source = gr.Dropdown(
-                choices=["Google Reviews", "Yelp", "Email Support", "Twitter"], 
-                value="Google Reviews", 
-                label="Source Platform"
-            )
-            submit_btn = gr.Button("🚀 Process Ticket", variant="primary")
             
-            gr.Markdown("--- \n **Student:** Manav Kheni | **Course:** AI Workflow Design")
+            input_image = gr.Image(
+                label="Attach Photo Proof (Optional)", 
+                type="filepath", 
+                height=150
+            )
+            
+            submit_btn = gr.Button("🚀 Process Ticket", variant="primary", size="lg")
 
-        # Right Side (Output)
-        with gr.Column():
-            gr.Markdown("### ⚙️ System Status")
-            output_display = gr.Markdown(value="*Waiting for input...*")
+        # --- RIGHT COLUMN: OUTPUTS ---
+        with gr.Column(scale=1):
+            gr.Markdown("### 📊 Analysis Results")
+            
+            # 1. Visual Report (Top Half)
+            output_visual = gr.Markdown(label="Report Dashboard")
+            
+            # 2. Suggested Reply (Bottom Half - BIG BOX)
+            # FIXED: Removed 'show_copy_button=True' to prevent crash
+            output_reply = gr.Textbox(
+                label="🤖 Suggested Response (Copy & Paste)", 
+                lines=8
+            )
+            
+            # 3. Download Button
+            output_file = gr.File(label="Download Report (.csv)")
+            
+            # 4. Raw JSON (Hidden)
+            with gr.Accordion("See Raw Data (JSON)", open=False):
+                output_json = gr.JSON()
 
-    # Connect the button to the function
-    submit_btn.click(
-        fn=send_to_n8n, 
-        inputs=[input_text, input_source], 
-        outputs=output_display
+    # --- CLICKABLE EXAMPLES ---
+    gr.Markdown("### ⚡ Quick Test Examples")
+    gr.Examples(
+        examples=[
+            ["This is the absolute worst product. It arrived broken and I want a refund!", "Email Support", None],
+            ["I just wanted to say thank you! The service was amazing and Mike was so helpful.", "Google Reviews", None],
+            ["Where is my package? The tracking number is 1Z999999999. This is a scam!", "Twitter", None]
+        ],
+        inputs=[input_text, input_source, input_image]
     )
 
-# Run the app
+    # Connect the Button to the Function
+    submit_btn.click(
+        fn=process_ticket, 
+        inputs=[input_text, input_source, input_image], 
+        outputs=[output_visual, output_reply, output_file, output_json] 
+    )
+
+# Launch the App
 if __name__ == "__main__":
-    demo.launch()
+    # FIXED: Added theme here to satisfy the warning
+    demo.launch(theme=gr.themes.Soft())
